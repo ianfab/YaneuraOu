@@ -160,7 +160,7 @@ typedef std::unique_ptr<StateList> StateListPtr;
 
 // packされたsfen
 struct PackedSfen {
-	u8 data[32];
+	u8 data[64];
 
 	// std::unordered_mapで使用できるように==と!=を定義しておく。
 

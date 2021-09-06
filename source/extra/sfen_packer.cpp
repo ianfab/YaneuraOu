@@ -121,13 +121,22 @@ struct HuffmanedPiece
 HuffmanedPiece huffman_table[] =
 {
   {0x00,1}, // NO_PIECE
-  {0x01,2}, // PAWN
-  {0x03,4}, // LANCE
-  {0x0b,4}, // KNIGHT
-  {0x07,4}, // SILVER
-  {0x1f,6}, // BISHOP
-  {0x3f,6}, // ROOK
-  {0x0f,5}, // GOLD
+  {0b01001,5}, // PAWN
+  {0b01011,5}, // LANCE
+  {0b01101,5}, // KNIGHT
+  {0b00101,5}, // SILVER
+  {0b00001,5}, // BISHOP
+  {0b00011,5}, // ROOK
+  {0b01111,5}, // GOLD
+  {0x00,0}, // KING
+  // Promoted
+  {0b01111,5}, // PAWN
+  {0b01111,5}, // LANCE
+  {0b01111,5}, // KNIGHT
+  {0b01111,5}, // SILVER
+  {0b10001,5}, // BISHOP
+  {0b00111,5}, // ROOK
+  {0b01111,5}, // GOLD
 };
 
 // sfenを圧縮/解凍するためのクラス
@@ -143,7 +152,7 @@ struct SfenPacker
   {
 //    cout << pos;
 
-    memset(data, 0, 32 /* 256bit */);
+    memset(data, 0, 64 /* 256bit */);
     stream.set_data(data);
 
     // 手番
@@ -151,33 +160,34 @@ struct SfenPacker
 
     // 先手玉、後手玉の位置、それぞれ7bit
     for(auto c : COLOR)
-      stream.write_n_bit(pos.king_square(c), 7);
+    {
+      stream.write_n_bit((RANK_9 - rank_of(pos.king_square(c))) * 9 + (FILE_9 - file_of(pos.king_square(c))), 7);
+      //std::cout << (RANK_9 - rank_of(pos.king_square(c))) * 9 + (FILE_9 - file_of(pos.king_square(c))) << std::endl;
+    }
 
     // 盤面の駒は王以外はそのまま書き出して良し！
-    for (auto sq : SQ)
-    {
-      // 盤上の玉以外の駒をハフマン符号化して書き出し
-      Piece pc = pos.piece_on(sq);
-      if (type_of(pc) == KING)
-        continue;
-      write_board_piece_to_stream(pc);
-    }
+    for (Rank r = RANK_1; r <= RANK_9; ++r)
+      for (File f = FILE_9; f >= FILE_1; --f)
+        {
+          // 盤上の玉以外の駒をハフマン符号化して書き出し
+          Piece pc = pos.piece_on(f | r);
+          if (type_of(pc) == KING)
+            continue;
+          write_board_piece_to_stream(pc);
+        }
 
     // 手駒をハフマン符号化して書き出し
     for (auto c : COLOR)
-      for (PieceType pr = PAWN; pr < KING; ++pr)
+      for (PieceType pt : {BISHOP, ROOK, SILVER, DRAGON, PAWN, LANCE, KNIGHT, GOLD, HORSE, KING})
       {
-        int n = hand_count(pos.hand_of(c), pr);
-
-        // この駒、n枚持ってるよ
-        for (int i = 0; i < n; ++i)
-          write_hand_piece_to_stream(make_piece(c, pr));
+        int n = pt >= KING ? 0 : hand_count(pos.hand_of(c), pt);
+        stream.write_n_bit(n, 5);
       }
 
     // 綺麗に書けた..気がする。
 
     // 全部で256bitのはず。(普通の盤面であれば)
-    ASSERT_LV3(stream.get_cursor() == 256);
+    ASSERT_LV3(stream.get_cursor() == 512);
   }
 
   // data[32]をsfen化して返す。
@@ -239,17 +249,12 @@ struct SfenPacker
   void write_board_piece_to_stream(Piece pc)
   {
     // 駒種
-    PieceType pr = raw_type_of(pc);
-    auto c = huffman_table[pr];
+    PieceType pt = type_of(pc);
+    auto c = huffman_table[pt];
     stream.write_n_bit(c.code, c.bits);
  
     if (pc == NO_PIECE)
       return;
-
-    // 成りフラグ
-    // (金はこのフラグはない)
-    if (pr!=GOLD)
-      stream.write_one_bit((PIECE_PROMOTE & pc) ? 1 : 0);
 
     // 先後フラグ
     stream.write_one_bit(color_of(pc));
