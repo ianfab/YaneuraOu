@@ -602,6 +602,11 @@ void go_cmd(const Position& pos, istringstream& is , StateListPtr& states , bool
 			while (is >> token)
 				limits.searchmoves.push_back(USI::to_move(pos, token));
 
+		// MultiPVの出力に必ず含める指し手。searchmovesと同様、行の最後に書く必要がある。
+		else if (token == "ensuremoves")
+			while (is >> token)
+				limits.ensureMoves.push_back(USI::to_move(pos, token));
+
 		// 先手、後手の残り時間。[ms]
 		else if (token == "wtime")     is >> limits.time[WHITE];
 		else if (token == "btime")     is >> limits.time[BLACK];

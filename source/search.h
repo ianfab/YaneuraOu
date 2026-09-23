@@ -109,6 +109,10 @@ namespace Search {
 		// root(探索開始局面)で、探索する指し手集合。特定の指し手を除外したいときにここから省く
 		std::vector<Move> searchmoves;
 
+		// MultiPVの出力に必ず含める指し手。実際に指された手を最善手と比較したいときに、
+		// MultiPVを大きくせずに順位と評価値の両方を得るために用いる。
+		std::vector<Move> ensureMoves;
+
 		// time[]   : 残り時間(ms換算で)
 		// inc[]    : 1手ごとに増加する時間(フィッシャールール)
 		// npmsec   : 探索node数を思考経過時間の代わりに用いるモードであるかのフラグ(from UCI)

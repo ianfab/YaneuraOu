@@ -85,6 +85,10 @@ public:
 	// pvLast   : tbRank絡み。将棋では関係ないので用いない。
 	size_t pvIdx /*,pvLast*/;
 
+	// このスレッドで実際に用いているMultiPVの数。
+	// (ensuremovesの処理でroot nodeから参照する)
+	size_t multiPV;
+
 	// 置換表に平均的にどれくらいhitしているかという統計情報
 	// これに基づき、枝刈りを調整する。
 	uint64_t ttHitAverage;

@@ -800,8 +800,14 @@ void Thread::search()
 	if (skill.enabled())
 		multiPV = std::max(multiPV, (size_t)4);
 
+	// ensuremovesで指定された指し手を表示するための枠を確保する。
+	multiPV = std::max(multiPV, Limits.ensureMoves.size());
+
 	// この局面での指し手の数を上回ってはいけない
 	multiPV = std::min(multiPV, rootMoves.size());
+
+	// root nodeから参照するので控えておく。
+	this->multiPV = multiPV;
 
 	// 最近の置換表の平均ヒット率の初期化。
 	ttHitAverage = TtHitAverageWindow * TtHitAverageResolution / 2;
@@ -938,7 +944,30 @@ void Thread::search()
 				// 一つ目の指し手以外は-VALUE_INFINITEが返る仕様なので並べ替えのために安定ソートを
 				// 用いないと前回の反復深化の結果によって得た並び順を変えてしまうことになるのでまずい。
 
-				stable_sort(rootMoves.begin() + pvIdx, rootMoves.end());
+				// ensuremovesの指し手が残りの枠でしか表示できないなら、その枠に固定する。
+				{
+					size_t unmet = 0;
+					Move firstUnmet = MOVE_NONE;
+					for (Move em : Limits.ensureMoves)
+						if (!std::count(rootMoves.begin(), rootMoves.begin() + pvIdx, em))
+						{
+							if (firstUnmet == MOVE_NONE)
+								firstUnmet = em;
+							++unmet;
+						}
+
+					auto it = firstUnmet != MOVE_NONE
+						? std::find(rootMoves.begin() + pvIdx, rootMoves.end(), firstUnmet)
+						: rootMoves.end();
+
+					if (unmet > 0 && unmet >= multiPV - pvIdx && it != rootMoves.end())
+					{
+						std::iter_swap(rootMoves.begin() + pvIdx, it);
+						stable_sort(rootMoves.begin() + pvIdx + 1, rootMoves.end());
+					}
+					else
+						stable_sort(rootMoves.begin() + pvIdx, rootMoves.end());
+				}
 
 				if (Threads.stop)
 					break;
@@ -2022,6 +2051,25 @@ namespace {
 			if (rootNode && !std::count(thisThread->rootMoves.begin() + thisThread->pvIdx,
 				thisThread->rootMoves.end(), move))
 				continue;
+
+			// ensuremovesの指し手を表示する枠しか残っていないなら、その指し手だけを探索する。
+			if (rootNode && !Limits.ensureMoves.empty())
+			{
+				size_t unmet = 0;
+				Move firstUnmet = MOVE_NONE;
+				for (Move em : Limits.ensureMoves)
+					if (!std::count(thisThread->rootMoves.begin(),
+						thisThread->rootMoves.begin() + thisThread->pvIdx, em))
+					{
+						if (firstUnmet == MOVE_NONE)
+							firstUnmet = em;
+						++unmet;
+					}
+
+				if (unmet > 0 && unmet >= thisThread->multiPV - thisThread->pvIdx
+					&& move != firstUnmet)
+					continue;
+			}
 
 			// Check for legality
 			// moveの合法性をチェック。
