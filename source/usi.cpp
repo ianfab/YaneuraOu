@@ -95,6 +95,9 @@ namespace Learner
   // 生成した棋譜からの学習
   void learn(Position& pos, istringstream& is);
 
+  // 教師局面の評価値の付け直し
+  void rescore(Position& pos, istringstream& is);
+
 #if defined(GENSFEN2019)
   // 開発中の教師局面の自動生成コマンド
   void gen_sfen2019(Position& pos, istringstream& is);
@@ -966,6 +969,7 @@ void USI::loop(int argc, char* argv[])
 #if defined (EVAL_LEARN)
 		else if (token == "gensfen") Learner::gen_sfen(pos, is);
 		else if (token == "learn") Learner::learn(pos, is);
+		else if (token == "rescore") Learner::rescore(pos, is);
 
 #if defined (GENSFEN2019)
 		// 開発中の教師局面生成コマンド

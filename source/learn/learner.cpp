@@ -993,6 +993,115 @@ void gen_sfen(Position&, istringstream& is)
 }
 
 // -----------------------------------
+//  教師局面の評価値を付け直すコマンド(rescore)
+// -----------------------------------
+
+// Replaces the scores of an existing training data file by the evaluation of this engine,
+// e.g. to distill its evaluation function into a network of another engine.
+//
+//   rescore input_file_name in.bin [output_file_name out.bin] [depth -1] [score_scale 1.0]
+//
+// depth < 0 : static evaluation, depth == 0 : quiescence search, depth > 0 : search with this depth.
+// The score is from the side to move's point of view, multiplied by score_scale and clamped to +-32000.
+// Positions that can not be decoded are dropped, all other fields are kept as they are.
+// The number of threads is set by the USI option Threads.
+void rescore(Position&, istringstream& is)
+{
+	string input_file_name;
+	string output_file_name = "rescored.bin";
+	int depth = -1;
+	double score_scale = 1.0;
+
+	string token;
+	while (is >> token)
+	{
+		if (token == "input_file_name")
+			is >> input_file_name;
+		else if (token == "output_file_name")
+			is >> output_file_name;
+		else if (token == "depth")
+			is >> depth;
+		else if (token == "score_scale")
+			is >> score_scale;
+		else
+			cout << "Error! : Illegal token " << token << endl;
+	}
+
+	const size_t thread_num = (size_t)Options["Threads"];
+
+	cout << "rescore : " << endl
+		<< "  input_file_name  = " << input_file_name << endl
+		<< "  output_file_name = " << output_file_name << endl
+		<< "  depth            = " << depth << endl
+		<< "  score_scale      = " << score_scale << endl
+		<< "  thread_num (set by USI setoption) = " << thread_num << endl;
+
+	ifstream ifs(input_file_name, ios::binary);
+	ofstream ofs(output_file_name, ios::binary);
+	if (!ifs || !ofs)
+	{
+		cout << "Error! : can't open " << (!ifs ? input_file_name : output_file_name) << endl;
+		return;
+	}
+
+	Threads.stop = false;
+
+	const size_t chunk_size = 1 << 20;
+	vector<PackedSfenValue> psvs(chunk_size);
+	vector<u8> decoded(chunk_size);
+	u64 read_count = 0, write_count = 0;
+	auto start = std::chrono::steady_clock::now();
+
+	while (true)
+	{
+		ifs.read((char*)psvs.data(), chunk_size * sizeof(PackedSfenValue));
+		const size_t n = (size_t)ifs.gcount() / sizeof(PackedSfenValue);
+		if (n == 0)
+			break;
+
+		// 各スレッドに連続した区間を割り当てる。
+		vector<std::thread> workers;
+		for (size_t t = 0; t < thread_num; ++t)
+			workers.emplace_back([&, t]
+			{
+				WinProcGroup::bindThisThread(t);
+
+				auto th = Threads[t];
+				auto& pos = th->rootPos;
+				StateInfo si;
+
+				for (size_t i = n * t / thread_num; i < n * (t + 1) / thread_num; ++i)
+				{
+					auto& psv = psvs[i];
+					decoded[i] = pos.set_from_packed_sfen(psv.sfen, &si, th, false, psv.gamePly).is_ok();
+					if (!decoded[i])
+						continue;
+
+					Value v = depth < 0 ? Eval::evaluate(pos) : search(pos, depth).first;
+					double score = std::round(v * score_scale);
+					psv.score = (s16)std::max(-32000.0, std::min(32000.0, score));
+				}
+			});
+		for (auto& w : workers)
+			w.join();
+
+		for (size_t i = 0; i < n; ++i)
+			if (decoded[i])
+			{
+				ofs.write((const char*)&psvs[i], sizeof(PackedSfenValue));
+				++write_count;
+			}
+		read_count += n;
+
+		auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+		cout << read_count << " sfens read, " << write_count << " written, "
+			<< read_count * 1000 / std::max<s64>(ms, 1) << " sfens/s" << endl;
+	}
+
+	cout << "rescore finished. " << read_count - write_count << " sfens dropped." << endl;
+}
+
+// -----------------------------------
 // 生成した棋譜から学習させるコマンド(learn)
 // -----------------------------------
 

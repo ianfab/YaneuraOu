@@ -79,264 +79,202 @@ private:
 };
 
 
-//  ハフマン符号化
-//   ※　 なのはminiの符号化から、変換が楽になるように単純化。
+// Packed position format of Fairy-Stockfish (variant-nnue-tools) for shogi, 512 bits:
 //
-//   盤上の1升(NO_PIECE以外) = 2～6bit ( + 成りフラグ1bit+ 先後1bit )
-//   手駒の1枚               = 1～5bit ( + 成りフラグ1bit+ 先後1bit )
+//   side to move                    1 bit (0 = sente)
+//   king squares (sente, gote)      7 bits each
+//   board without kings             empty square = 1 bit "0",
+//                                   piece = 5 bit code + 1 bit color
+//   hand counts (sente, gote)       5 bits for each piece type in fairy_piece_order
+//   rest (castling, ep, rule50, move number) is left zero.
 //
-//    空     xxxxx0 + 0    (none)
-//    歩     xxxx01 + 2    xxxx0 + 2
-//    香     xx0011 + 2    xx001 + 2
-//    桂     xx1011 + 2    xx101 + 2
-//    銀     xx0111 + 2    xx011 + 2
-//    金     x01111 + 1    x0111 + 1 // 金は成りフラグはない。
-//    角     011111 + 2    01111 + 2
-//    飛     111111 + 2    11111 + 2
+// Squares are numbered from the bottom left corner as seen from sente (9i = 0, 1i = 8, 9h = 9, ...),
+// the board is written from rank "a" to rank "i" and within a rank from file 9 to file 1.
 //
-// すべての駒が盤上にあるとして、
-//     空 81 - 40駒 = 41升 = 41bit
-//     歩      4bit*18駒   = 72bit
-//     香      6bit* 4駒   = 24bit
-//     桂      6bit* 4駒   = 24bit
-//     銀      6bit* 4駒   = 24bit            
-//     金      6bit* 4駒   = 24bit
-//     角      8bit* 2駒   = 16bit
-//     飛      8bit* 2駒   = 16bit
-//                          -------
-//                          241bit + 1bit(手番) + 7bit×2(王の位置先後) = 256bit
-//
-// 盤上の駒が手駒に移動すると盤上の駒が空になるので盤上のその升は1bitで表現でき、
-// 手駒は、盤上の駒より1bit少なく表現できるので結局、全体のbit数に変化はない。
-// ゆえに、この表現において、どんな局面でもこのbit数で表現できる。
-// 手駒に成りフラグは不要だが、これも含めておくと盤上の駒のbit数-1になるので
-// 全体のbit数が固定化できるのでこれも含めておくことにする。
+// The piece code is 2 * index + 1, where index is the position of the piece type in
+// fairy_piece_order (the order of the shogi piece types in Fairy-Stockfish).
+// Fairy-Stockfish has no separate promoted minor pieces, so they are written as golds.
 
-struct HuffmanedPiece
-{
-  int code; // どうコード化されるか
-  int bits; // 何bit専有するのか
-};
+static const PieceType fairy_piece_order[] = { BISHOP, ROOK, SILVER, DRAGON, PAWN, LANCE, KNIGHT, GOLD, HORSE, KING };
+static const int FAIRY_PIECE_TYPES = 10;
 
-HuffmanedPiece huffman_table[] =
+// Maximum number of pieces of a raw piece type, needed to keep the piece numbers of evalList in range.
+static const int max_piece_count[KING] = { 0, 18, 4, 4, 4, 2, 2, 4 };
+
+static int fairy_piece_index(PieceType pt)
 {
-  {0x00,1}, // NO_PIECE
-  {0b01001,5}, // PAWN
-  {0b01011,5}, // LANCE
-  {0b01101,5}, // KNIGHT
-  {0b00101,5}, // SILVER
-  {0b00001,5}, // BISHOP
-  {0b00011,5}, // ROOK
-  {0b01111,5}, // GOLD
-  {0x00,0}, // KING
-  // Promoted
-  {0b01111,5}, // PAWN
-  {0b01111,5}, // LANCE
-  {0b01111,5}, // KNIGHT
-  {0b01111,5}, // SILVER
-  {0b10001,5}, // BISHOP
-  {0b00111,5}, // ROOK
-  {0b01111,5}, // GOLD
-};
+  // Promoted minor pieces are golds in Fairy-Stockfish.
+  if (pt == PRO_PAWN || pt == PRO_LANCE || pt == PRO_KNIGHT || pt == PRO_SILVER)
+    pt = GOLD;
+
+  for (int i = 0; i < FAIRY_PIECE_TYPES; ++i)
+    if (fairy_piece_order[i] == pt)
+      return i;
+
+  ASSERT_LV1(false);
+  return 0;
+}
+
+static int to_fairy_square(Square sq) { return (RANK_9 - rank_of(sq)) * 9 + (FILE_9 - file_of(sq)); }
+static Square from_fairy_square(int i) { return (File)(FILE_9 - i % 9) | (Rank)(RANK_9 - i / 9); }
 
 // sfenを圧縮/解凍するためのクラス
-// sfenはハフマン符号化をすることで256bit(32bytes)にpackできる。
-// このことはなのはminiにより証明された。上のハフマン符号化である。
-//
-// 内部フォーマット = 手番1bit+王の位置7bit*2 + 盤上の駒(ハフマン符号化) + 手駒(ハフマン符号化)
-//
 struct SfenPacker
 {
-  // sfenをpackしてdata[32]に格納する。
+  // sfenをpackしてdata[64]に格納する。
   void pack(const Position& pos)
   {
-//    cout << pos;
-
-    memset(data, 0, 64 /* 256bit */);
+    memset(data, 0, 64 /* 512bit */);
     stream.set_data(data);
 
     // 手番
     stream.write_one_bit((int)(pos.side_to_move()));
 
     // 先手玉、後手玉の位置、それぞれ7bit
-    for(auto c : COLOR)
-    {
-      stream.write_n_bit((RANK_9 - rank_of(pos.king_square(c))) * 9 + (FILE_9 - file_of(pos.king_square(c))), 7);
-      //std::cout << (RANK_9 - rank_of(pos.king_square(c))) * 9 + (FILE_9 - file_of(pos.king_square(c))) << std::endl;
-    }
+    for (auto c : COLOR)
+      stream.write_n_bit(to_fairy_square(pos.king_square(c)), 7);
 
     // 盤面の駒は王以外はそのまま書き出して良し！
     for (Rank r = RANK_1; r <= RANK_9; ++r)
       for (File f = FILE_9; f >= FILE_1; --f)
-        {
-          // 盤上の玉以外の駒をハフマン符号化して書き出し
-          Piece pc = pos.piece_on(f | r);
-          if (type_of(pc) == KING)
-            continue;
-          write_board_piece_to_stream(pc);
-        }
-
-    // 手駒をハフマン符号化して書き出し
-    for (auto c : COLOR)
-      for (PieceType pt : {BISHOP, ROOK, SILVER, DRAGON, PAWN, LANCE, KNIGHT, GOLD, HORSE, KING})
       {
-        int n = pt >= KING ? 0 : hand_count(pos.hand_of(c), pt);
+        Piece pc = pos.piece_on(f | r);
+        if (type_of(pc) == KING)
+          continue;
+        write_board_piece_to_stream(pc);
+      }
+
+    // 手駒は駒種ごとに枚数を書き出す
+    for (auto c : COLOR)
+      for (PieceType pt : fairy_piece_order)
+      {
+        int n = (pt == DRAGON || pt == HORSE || pt == KING) ? 0 : hand_count(pos.hand_of(c), pt);
         stream.write_n_bit(n, 5);
       }
 
-    // 綺麗に書けた..気がする。
-
-    // 全部で256bitのはず。(普通の盤面であれば)
-    ASSERT_LV3(stream.get_cursor() == 512);
+    ASSERT_LV3(stream.get_cursor() <= 512);
   }
 
-  // data[32]をsfen化して返す。
+  // data[64]をsfen化して返す。
   string unpack()
   {
-    stream.set_data(data);
-
-    // 盤上の81升
-    Piece board[81];
-    memset(board, 0, sizeof(Piece)*81);
-
-    // 手番
-    Color turn = (Color)stream.read_one_bit();
-    
-    // まず玉の位置
-    for (auto c : COLOR)
-      board[stream.read_n_bit(7)] = make_piece(c, KING);
-
-    // 盤上の駒
-    for (auto sq : SQ)
-    {
-      // すでに玉がいるようだ
-      if (type_of(board[sq]) == KING)
-        continue;
-
-      board[sq] = read_board_piece_from_stream();
-
-      //cout << sq << ' ' << board[sq] << ' ' << stream.get_cursor() << endl;
-
-      ASSERT_LV3(stream.get_cursor() <= 256);
-    }
-
-    // 手駒
-    Hand hand[2] = { HAND_ZERO,HAND_ZERO };
-    while (stream.get_cursor() != 256)
-    {
-      // 256になるまで手駒が格納されているはず
-      auto pc = read_hand_piece_from_stream();
-      add_hand(hand[(int)color_of(pc)], type_of(pc));
-    }
-
-    // boardとhandが確定した。これで局面を構築できる…かも。
-    // Position::sfen()は、board,hand,side_to_move,game_plyしか参照しないので
-    // 無理やり代入してしまえば、sfen()で文字列化できるはず。
+    Piece board[SQ_NB];
+    Hand hand[COLOR_NB];
+    Color turn;
+    if (!decode(board, hand, turn))
+      return "";
 
     return Position::sfen_from_rawdata(board, hand, turn, 0);
   }
 
-  // pack()でpackされたsfen(256bit = 32bytes)
-  // もしくはunpack()でdecodeするsfen
-  u8 *data; // u8[32];
+  // dataを盤面、手駒、手番に展開する。不正なデータならfalseを返す。
+  //
+  // Promoted minor pieces are stored as golds, so golds exceeding the four real ones are turned back
+  // into promoted pieces of a piece type that is missing otherwise. Which of the golds on the board
+  // becomes the promoted piece is arbitrary, the evaluation does not distinguish them
+  // (unless DISTINGUISH_GOLDS is defined).
+  bool decode(Piece board[SQ_NB], Hand hand[COLOR_NB], Color& turn)
+  {
+    stream.set_data(data);
 
-//private:
-  // Position::set_from_packed_sfen(u8 data[32])でこれらの関数を使いたいので筋は悪いがpublicにしておく。
+    for (auto sq : SQ)
+      board[sq] = NO_PIECE;
+    hand[BLACK] = hand[WHITE] = HAND_ZERO;
+
+    turn = (Color)stream.read_one_bit();
+
+    for (auto c : COLOR)
+    {
+      int i = stream.read_n_bit(7);
+      if (i >= SQ_NB)
+        return false;
+      board[from_fairy_square(i)] = make_piece(c, KING);
+    }
+
+    for (Rank r = RANK_1; r <= RANK_9; ++r)
+      for (File f = FILE_9; f >= FILE_1; --f)
+      {
+        Square sq = f | r;
+        if (type_of(board[sq]) == KING)
+          continue;
+
+        if (!stream.read_one_bit())
+          continue;
+
+        int index = stream.read_n_bit(4);
+        if (index >= FAIRY_PIECE_TYPES || fairy_piece_order[index] == KING)
+          return false;
+
+        Color c = (Color)stream.read_one_bit();
+        board[sq] = make_piece(c, fairy_piece_order[index]);
+      }
+
+    for (auto c : COLOR)
+      for (PieceType pt : fairy_piece_order)
+      {
+        int n = stream.read_n_bit(5);
+        if (n == 0)
+          continue;
+        if (pt == DRAGON || pt == HORSE || pt == KING)
+          return false;
+        add_hand(hand[c], pt, n);
+      }
+
+    // 駒種ごとの枚数
+    int count[KING] = {};
+    for (auto sq : SQ)
+      if (board[sq] != NO_PIECE && type_of(board[sq]) != KING)
+        count[raw_type_of(board[sq])]++;
+    for (auto c : COLOR)
+      for (PieceType pt = PAWN; pt < KING; ++pt)
+        count[pt] += hand_count(hand[c], pt);
+
+    // 金が4枚を超えた分は成り駒に戻す
+    for (auto sq : SQ)
+    {
+      if (count[GOLD] <= max_piece_count[GOLD])
+        break;
+
+      if (type_of(board[sq]) != GOLD)
+        continue;
+
+      for (PieceType pt : { PAWN, LANCE, KNIGHT, SILVER })
+        if (count[pt] < max_piece_count[pt])
+        {
+          board[sq] = make_piece(color_of(board[sq]), (PieceType)(pt + PIECE_TYPE_PROMOTE));
+          count[pt]++;
+          count[GOLD]--;
+          break;
+        }
+    }
+
+    for (PieceType pt = PAWN; pt < KING; ++pt)
+      if (count[pt] > max_piece_count[pt])
+        return false;
+
+    return true;
+  }
+
+  // pack()でpackされたsfen(512bit = 64bytes)
+  // もしくはunpack()でdecodeするsfen
+  u8 *data; // u8[64];
 
   BitStream stream;
 
   // 盤面の駒をstreamに出力する。
   void write_board_piece_to_stream(Piece pc)
   {
-    // 駒種
-    PieceType pt = type_of(pc);
-    auto c = huffman_table[pt];
-    stream.write_n_bit(c.code, c.bits);
- 
     if (pc == NO_PIECE)
+    {
+      stream.write_one_bit(0);
       return;
-
-    // 先後フラグ
-    stream.write_one_bit(color_of(pc));
-  }
-
-  // 手駒をstreamに出力する
-  void write_hand_piece_to_stream(Piece pc)
-  {
-    ASSERT_LV3(pc != NO_PIECE);
+    }
 
     // 駒種
-    PieceType pr = raw_type_of(pc);
-    auto c = huffman_table[pr];
-    stream.write_n_bit(c.code >> 1, c.bits - 1);
-
-    // 金以外は手駒であっても不成を出力して、盤上の駒のbit数-1を保つ
-    if (pr != GOLD)
-      stream.write_one_bit(false);
+    stream.write_n_bit(2 * fairy_piece_index(type_of(pc)) + 1, 5);
 
     // 先後フラグ
     stream.write_one_bit(color_of(pc));
-  }
-
-  // 盤面の駒を1枚streamから読み込む
-  Piece read_board_piece_from_stream()
-  {
-    PieceType pr = NO_PIECE_TYPE;
-    int code = 0, bits = 0;
-    while (true)
-    {
-      code |= stream.read_one_bit() << bits;
-      ++bits;
-
-      ASSERT_LV3(bits <= 6);
-
-      for (pr = NO_PIECE_TYPE; pr < KING; ++pr)
-        if (huffman_table[pr].code == code
-          && huffman_table[pr].bits == bits)
-          goto Found;
-    }
-  Found:;
-    if (pr == NO_PIECE_TYPE)
-      return NO_PIECE;
-
-    // 成りフラグ
-    // (金はこのフラグはない)
-    bool promote = (pr == GOLD) ? false : stream.read_one_bit();
-
-    // 先後フラグ
-    Color c = (Color)stream.read_one_bit();
-    
-    return make_piece(c, pr + (promote ? PIECE_TYPE_PROMOTE : NO_PIECE_TYPE));
-  }
-
-  // 手駒を1枚streamから読み込む
-  Piece read_hand_piece_from_stream()
-  {
-    PieceType pr = NO_PIECE_TYPE;
-    int code = 0, bits = 0;
-    while (true)
-    {
-      code |= stream.read_one_bit() << bits;
-      ++bits;
-
-      ASSERT_LV3(bits <= 6);
-
-      for (pr = PAWN; pr < KING; ++pr)
-        if ((huffman_table[pr].code >> 1) == code
-          && (huffman_table[pr].bits -1) == bits)
-          goto Found;
-    }
-  Found:;
-    ASSERT_LV3(pr != NO_PIECE_TYPE);
-
-    // 金以外であれば成りフラグを1bit捨てる
-    if (pr != GOLD)
-      stream.read_one_bit();
-
-    // 先後フラグ
-    Color c = (Color)stream.read_one_bit();
-
-    return make_piece(c, pr);
   }
 };
 
@@ -345,20 +283,25 @@ struct SfenPacker
 //        Positionクラスに追加
 // -----------------------------------
 
-// 高速化のために直接unpackする関数を追加。かなりしんどい。
-// packer::unpack()とPosition::set()とを合体させて書く。
+// 高速化のために直接unpackする関数を追加。
+// packer::decode()とPosition::set()とを合体させて書く。
 Tools::Result Position::set_from_packed_sfen(const PackedSfen& sfen , StateInfo * si, Thread* th, bool mirror , int gamePly_ /* = 0 */)
 {
 	SfenPacker packer;
-	auto& stream = packer.stream;
-	stream.set_data((u8*)&sfen);
+	packer.data = (u8*)&sfen;
+
+	Piece packed_board[SQ_NB];
+	Hand packed_hand[COLOR_NB];
+	Color turn;
+	if (!packer.decode(packed_board, packed_hand, turn))
+		return Tools::Result(Tools::ResultCode::SomeError);
 
 	std::memset(this, 0, sizeof(Position));
 	std::memset(si, 0, sizeof(StateInfo));
 	st = si;
 
 	// 手番
-	sideToMove = (Color)stream.read_one_bit();
+	sideToMove = turn;
 
 #if defined(USE_EVAL_LIST)
 
@@ -373,42 +316,19 @@ Tools::Result Position::set_from_packed_sfen(const PackedSfen& sfen , StateInfo 
 
 	kingSquare[BLACK] = kingSquare[WHITE] = SQ_NB;
 
-	// まず玉の位置
-	if (mirror)
-	{
-		for (auto c : COLOR)
-			board[Mir((Square)stream.read_n_bit(7))] = make_piece(c, KING);
-	}
-	else
-	{
-		for (auto c : COLOR)
-			board[stream.read_n_bit(7)] = make_piece(c, KING);
-	}
-
 	// 盤上の駒
 	for (auto sq : SQ)
 	{
-		if (mirror)
-			sq = Mir(sq);
-
-		// すでに玉がいるようだ
-		Piece pc;
-		if (type_of(board[sq]) != KING)
-		{
-			ASSERT_LV3(board[sq] == NO_PIECE);
-			pc = packer.read_board_piece_from_stream();
-		}
-		else
-		{
-			pc = board[sq];
-			board[sq] = NO_PIECE; // いっかい取り除いておかないとput_piece()でASSERTに引っかかる。
-		}
+		Piece pc = packed_board[sq];
 
 		// 駒がない場合もあるのでその場合はスキップする。
 		if (pc == NO_PIECE)
 			continue;
 
-		put_piece(sq, Piece(pc));
+		if (mirror)
+			sq = Mir(sq);
+
+		put_piece(sq, pc);
 
 #if defined(USE_EVAL_LIST)
 		// evalListの更新
@@ -419,48 +339,23 @@ Tools::Result Position::set_from_packed_sfen(const PackedSfen& sfen , StateInfo 
 
 		evalList.put_piece(piece_no, sq, pc); // sqの升にpcの駒を配置する
 #endif
-
-		//cout << sq << ' ' << board[sq] << ' ' << stream.get_cursor() << endl;
-
-		if (stream.get_cursor() > 256)
-			return Tools::Result(Tools::ResultCode::SomeError);
-		//ASSERT_LV3(stream.get_cursor() <= 256);
 	}
 
 	// 手駒
-	hand[BLACK] = hand[WHITE] = (Hand)0;
-
-	int i = 0;
-	Piece lastPc = NO_PIECE;
-
-	while (stream.get_cursor() < 256)
-	{
-		// 256になるまで手駒が格納されているはず
-		auto pc = packer.read_hand_piece_from_stream();
-		add_hand(hand[(int)color_of(pc)], type_of(pc));
+	hand[BLACK] = packed_hand[BLACK];
+	hand[WHITE] = packed_hand[WHITE];
 
 #if defined(USE_EVAL_LIST)
-		// 何枚目のその駒であるかをカウントしておく。
-		if (lastPc != pc)
-			i = 0;
-		lastPc = pc;
-
-		// FV38などではこの個数分だけpieceListに突っ込まないといけない。
-		PieceType rpc = raw_type_of(pc);
-
-        PieceNumber piece_no = piece_no_count[rpc]++;
-		ASSERT_LV1(is_ok(piece_no));
-		evalList.put_piece(piece_no, color_of(pc), rpc, i++);
+	for (auto c : COLOR)
+		for (PieceType pt = PAWN; pt < KING; ++pt)
+			for (int i = 0; i < hand_count(hand[c], pt); ++i)
+			{
+				// FV38などではこの個数分だけpieceListに突っ込まないといけない。
+				PieceNumber piece_no = piece_no_count[pt]++;
+				ASSERT_LV1(is_ok(piece_no));
+				evalList.put_piece(piece_no, c, pt, i);
+			}
 #endif
-	}
-
-	if (stream.get_cursor() != 256)
-	{
-		// こんな局面はおかしい。デバッグ用。
-		//cout << "Error : set_from_packed_sfen() , position = " << endl << *this << endl;
-		//ASSERT_LV1(false);
-		return Tools::Result(Tools::ResultCode::SomeError);
-	}
 
 	gamePly = gamePly_;
 
@@ -482,11 +377,6 @@ Tools::Result Position::set_from_packed_sfen(const PackedSfen& sfen , StateInfo 
 
 	st->materialValue = Eval::material(*this);
 	Eval::compute_eval(*this);
-
-//	sync_cout << sfen() << *this << pieces(BLACK) << pieces(WHITE) << pieces() << sync_endl;
-
-	//if (!is_ok(*this))
-	//	std::cout << "info string Illigal Position?" << endl;
 
 	thisThread = th;
 
