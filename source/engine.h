@@ -270,11 +270,12 @@ public:
     }
 
     // USI拡張コマンド "rescore" 用のhook。
-    // Reads Fairy-Stockfish training data (FairyPsvRecord) from inputPath and writes it to outputPath
-    // with the score replaced by the static evaluation (depth < 0) or quiescence search (depth == 0)
-    // of this engine, multiplied by scoreScale.
+    // Reads training data from inputPath and writes it to outputPath with the score replaced by the
+    // static evaluation (depth < 0) or quiescence search (depth == 0) of this engine, multiplied by scoreScale.
+    // format is "fairy" (Fairy-Stockfish .bin, FairyPsvRecord) or "psv" (YaneuraOu .psv/.bin, PsvRecord).
     virtual bool rescore(const std::string& inputPath,
                          const std::string& outputPath,
+                         const std::string& format,
                          int                depth,
                          double             scoreScale,
                          std::string&       message) {
@@ -423,6 +424,7 @@ class Engine: public IEngine {
     // USI拡張コマンド "rescore" 用のhook。
     virtual bool rescore(const std::string& inputPath,
                          const std::string& outputPath,
+                         const std::string& format,
                          int                depth,
                          double             scoreScale,
                          std::string&       message) override {
@@ -617,10 +619,11 @@ class EngineWrapper: public IEngine {
 
     virtual bool rescore(const std::string& inputPath,
                          const std::string& outputPath,
+                         const std::string& format,
                          int                depth,
                          double             scoreScale,
                          std::string&       message) override {
-        return engine->rescore(inputPath, outputPath, depth, scoreScale, message);
+        return engine->rescore(inputPath, outputPath, format, depth, scoreScale, message);
     }
 #endif
 

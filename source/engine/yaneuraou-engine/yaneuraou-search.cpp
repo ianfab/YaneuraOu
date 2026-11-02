@@ -572,71 +572,38 @@ bool YaneuraOuEngine::qsearch_psv(const std::string& inputPath,
     return total.decodeErrors == 0 && total.illegalPv == 0;
 }
 
-// USI拡張コマンド "rescore" の実体。
-// Reads Fairy-Stockfish training data (FairyPsvRecord) chunk by chunk and replaces the score of each
-// record by the static evaluation (depth < 0) or the quiescence search value (depth == 0) of this engine,
-// from the side to move's point of view, multiplied by scoreScale and clamped to +-32000.
-// Records that can not be decoded are dropped, all other fields are kept as they are.
-bool YaneuraOuEngine::rescore(const std::string& inputPath,
-                              const std::string& outputPath,
-                              int                depth,
-                              double             scoreScale,
-                              std::string&       message) {
+namespace {
 
-    if (inputPath.empty() || outputPath.empty())
-    {
-        message = "usage: rescore input_file_name in.bin output_file_name out.bin [depth -1] [score_scale 1.0]";
-        return false;
-    }
+// Decodes the position of a training data record for the "rescore" command.
+Tools::Result set_rescore_position(Position& pos, StateInfo& si, const FairyPsvRecord& record) {
+    return pos.set_from_fairy_packed_sfen(record.sfen, &si, record.gamePly);
+}
 
-    if (inputPath == outputPath)
-    {
-        message = "input and output path must be different.";
-        return false;
-    }
+Tools::Result set_rescore_position(Position& pos, StateInfo& si, const PsvRecord& record) {
+    return pos.set_from_packed_sfen(record.sfen, &si, false, record.gamePly);
+}
 
-    if (depth > 0)
-    {
-        message = "only depth -1 (static evaluation) and depth 0 (quiescence search) are supported.";
-        return false;
-    }
-
-    wait_for_search_finished();
-
-    if (threads.empty())
-        resize_threads();
-
-    if (threads.empty())
-    {
-        message = "no search worker is available.";
-        return false;
-    }
+// Body of the "rescore" command for one record type (FairyPsvRecord or PsvRecord).
+// Records are read chunk by chunk and distributed over the search workers like in qsearch_psv.
+template<typename Record>
+bool rescore_records(ThreadPool&        threads,
+                     std::ifstream&     input,
+                     std::ofstream&     output,
+                     int                depth,
+                     double             scoreScale,
+                     std::string&       message) {
 
     const size_t workerCount = threads.num_threads();
 
-    std::ifstream input(inputPath, std::ios::binary);
-    if (!input)
-    {
-        message = "failed to open input file: " + inputPath;
-        return false;
-    }
-
-    std::ofstream output(outputPath, std::ios::binary);
-    if (!output)
-    {
-        message = "failed to open output file: " + outputPath;
-        return false;
-    }
-
     constexpr size_t CHUNK_RECORDS = 1 << 20;
 
-    std::vector<FairyPsvRecord> records(CHUNK_RECORDS);
-    std::vector<u8>             decoded(CHUNK_RECORDS);
-    u64                         readCount = 0, writeCount = 0;
-    const TimePoint             start = now();
+    std::vector<Record> records(CHUNK_RECORDS);
+    std::vector<u8>     decoded(CHUNK_RECORDS);
+    u64                 readCount = 0, writeCount = 0;
+    const TimePoint     start = now();
 
-    const auto recordBytes = std::streamsize(sizeof(FairyPsvRecord));
-    const auto chunkBytes  = std::streamsize(records.size() * sizeof(FairyPsvRecord));
+    const auto recordBytes = std::streamsize(sizeof(Record));
+    const auto chunkBytes  = std::streamsize(records.size() * sizeof(Record));
 
     while (true)
     {
@@ -673,8 +640,7 @@ bool YaneuraOuEngine::rescore(const std::string& inputPath,
                         break;
 
                     auto& record   = records[index];
-                    decoded[index] =
-                      pos.set_from_fairy_packed_sfen(record.sfen, &si, record.gamePly).is_ok();
+                    decoded[index] = set_rescore_position(pos, si, record).is_ok();
                     if (!decoded[index])
                         continue;
 
@@ -697,7 +663,7 @@ bool YaneuraOuEngine::rescore(const std::string& inputPath,
 
         if (!output)
         {
-            message = "failed to write output file: " + outputPath;
+            message = "failed to write output file.";
             return false;
         }
 
@@ -709,7 +675,7 @@ bool YaneuraOuEngine::rescore(const std::string& inputPath,
 
     if (input.bad())
     {
-        message = "failed to read input file: " + inputPath;
+        message = "failed to read input file.";
         return false;
     }
 
@@ -718,6 +684,75 @@ bool YaneuraOuEngine::rescore(const std::string& inputPath,
        << " decode_errors=" << readCount - writeCount << " workers=" << workerCount;
     message = ss.str();
     return true;
+}
+
+} // namespace
+
+// USI拡張コマンド "rescore" の実体。
+// Replaces the score of each record of a training data file by the static evaluation (depth < 0)
+// or the quiescence search value (depth == 0) of this engine, from the side to move's point of view,
+// multiplied by scoreScale and clamped to +-32000. The file is either Fairy-Stockfish training data
+// (format "fairy", FairyPsvRecord) or YaneuraOu training data (format "psv", PsvRecord).
+// Records that can not be decoded are dropped, all other fields are kept as they are.
+bool YaneuraOuEngine::rescore(const std::string& inputPath,
+                              const std::string& outputPath,
+                              const std::string& format,
+                              int                depth,
+                              double             scoreScale,
+                              std::string&       message) {
+
+    if (inputPath.empty() || outputPath.empty())
+    {
+        message = "usage: rescore input_file_name in.bin output_file_name out.bin [format fairy|psv] [depth -1] [score_scale 1.0]";
+        return false;
+    }
+
+    if (inputPath == outputPath)
+    {
+        message = "input and output path must be different.";
+        return false;
+    }
+
+    if (format != "fairy" && format != "psv")
+    {
+        message = "format must be fairy or psv.";
+        return false;
+    }
+
+    if (depth > 0)
+    {
+        message = "only depth -1 (static evaluation) and depth 0 (quiescence search) are supported.";
+        return false;
+    }
+
+    wait_for_search_finished();
+
+    if (threads.empty())
+        resize_threads();
+
+    if (threads.empty())
+    {
+        message = "no search worker is available.";
+        return false;
+    }
+
+    std::ifstream input(inputPath, std::ios::binary);
+    if (!input)
+    {
+        message = "failed to open input file: " + inputPath;
+        return false;
+    }
+
+    std::ofstream output(outputPath, std::ios::binary);
+    if (!output)
+    {
+        message = "failed to open output file: " + outputPath;
+        return false;
+    }
+
+    return format == "fairy"
+           ? rescore_records<FairyPsvRecord>(threads, input, output, depth, scoreScale, message)
+           : rescore_records<PsvRecord>(threads, input, output, depth, scoreScale, message);
 }
 
 // utility functions

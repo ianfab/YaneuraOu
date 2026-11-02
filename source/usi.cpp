@@ -418,7 +418,7 @@ bool USIEngine::usi_cmdexec(const std::string& cmd) {
     else if (token == "qsearch_psv")
         qsearch_psv(is);
 
-    // Fairy-Stockfish形式の教師局面(.bin)の評価値を付け直す。
+    // 教師局面(Fairy-Stockfish形式またはPSV形式)の評価値を付け直す。
     else if (token == "rescore")
         rescore(is);
 
@@ -1435,11 +1435,14 @@ void USIEngine::qsearch_psv(std::istringstream& is) {
 }
 
 // USI拡張コマンド "rescore" のhandler。
-//   rescore input_file_name in.bin output_file_name out.bin [depth -1] [score_scale 1.0]
+//   rescore input_file_name in.bin output_file_name out.bin [format fairy] [depth -1] [score_scale 1.0]
+// format fairy : Fairy-Stockfish training data (72 bytes per record),
+// format psv   : YaneuraOu training data (PackedSfenValue, 40 bytes per record).
 // depth < 0 : static evaluation, depth == 0 : quiescence search.
 // The number of workers is set by the USI option Threads.
 void USIEngine::rescore(std::istringstream& is) {
     std::string inputPath, outputPath;
+    std::string format     = "fairy";
     int         depth      = -1;
     double      scoreScale = 1.0;
 
@@ -1450,6 +1453,8 @@ void USIEngine::rescore(std::istringstream& is) {
             is >> inputPath;
         else if (token == "output_file_name")
             is >> outputPath;
+        else if (token == "format")
+            is >> format;
         else if (token == "depth")
             is >> depth;
         else if (token == "score_scale")
@@ -1462,7 +1467,7 @@ void USIEngine::rescore(std::istringstream& is) {
     }
 
     std::string message;
-    const bool  ok = engine.rescore(inputPath, outputPath, depth, scoreScale, message);
+    const bool  ok = engine.rescore(inputPath, outputPath, format, depth, scoreScale, message);
 
     if (!message.empty())
         sync_cout << "info string " << message << sync_endl;

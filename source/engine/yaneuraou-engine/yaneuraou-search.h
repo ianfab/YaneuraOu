@@ -390,9 +390,10 @@ class YaneuraOuEngine: public Engine {
                              std::string&       message) override;
 
     // USI拡張コマンド "rescore" の実体。
-    // Fairy-Stockfish training data with the score replaced by the evaluation of this engine.
+    // Training data (Fairy-Stockfish or YaneuraOu format) with the score replaced by the evaluation of this engine.
     virtual bool rescore(const std::string& inputPath,
                          const std::string& outputPath,
+                         const std::string& format,
                          int                depth,
                          double             scoreScale,
                          std::string&       message) override;
