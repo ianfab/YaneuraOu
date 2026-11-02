@@ -268,6 +268,19 @@ public:
         message = "qsearch_psv is not supported by this engine.";
         return false;
     }
+
+    // USI拡張コマンド "rescore" 用のhook。
+    // Reads Fairy-Stockfish training data (FairyPsvRecord) from inputPath and writes it to outputPath
+    // with the score replaced by the static evaluation (depth < 0) or quiescence search (depth == 0)
+    // of this engine, multiplied by scoreScale.
+    virtual bool rescore(const std::string& inputPath,
+                         const std::string& outputPath,
+                         int                depth,
+                         double             scoreScale,
+                         std::string&       message) {
+        message = "rescore is not supported by this engine.";
+        return false;
+    }
 #endif
 
 #if STOCKFISH
@@ -404,6 +417,16 @@ class Engine: public IEngine {
                              size_t             workerCount,
                              std::string&       message) override {
         message = "qsearch_psv is not supported by this engine.";
+        return false;
+    }
+
+    // USI拡張コマンド "rescore" 用のhook。
+    virtual bool rescore(const std::string& inputPath,
+                         const std::string& outputPath,
+                         int                depth,
+                         double             scoreScale,
+                         std::string&       message) override {
+        message = "rescore is not supported by this engine.";
         return false;
     }
 #endif
@@ -590,6 +613,14 @@ class EngineWrapper: public IEngine {
                              size_t             workerCount,
                              std::string&       message) override {
         return engine->qsearch_psv(inputPath, outputPath, workerCount, message);
+    }
+
+    virtual bool rescore(const std::string& inputPath,
+                         const std::string& outputPath,
+                         int                depth,
+                         double             scoreScale,
+                         std::string&       message) override {
+        return engine->rescore(inputPath, outputPath, depth, scoreScale, message);
     }
 #endif
 

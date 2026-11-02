@@ -191,6 +191,7 @@ private:
     void moves();
     void getoption(std::istringstream& is);
     void qsearch_psv(std::istringstream& is);
+    void rescore(std::istringstream& is);
     void unittest(std::istringstream& is);
 #endif
 

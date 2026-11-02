@@ -572,6 +572,154 @@ bool YaneuraOuEngine::qsearch_psv(const std::string& inputPath,
     return total.decodeErrors == 0 && total.illegalPv == 0;
 }
 
+// USI拡張コマンド "rescore" の実体。
+// Reads Fairy-Stockfish training data (FairyPsvRecord) chunk by chunk and replaces the score of each
+// record by the static evaluation (depth < 0) or the quiescence search value (depth == 0) of this engine,
+// from the side to move's point of view, multiplied by scoreScale and clamped to +-32000.
+// Records that can not be decoded are dropped, all other fields are kept as they are.
+bool YaneuraOuEngine::rescore(const std::string& inputPath,
+                              const std::string& outputPath,
+                              int                depth,
+                              double             scoreScale,
+                              std::string&       message) {
+
+    if (inputPath.empty() || outputPath.empty())
+    {
+        message = "usage: rescore input_file_name in.bin output_file_name out.bin [depth -1] [score_scale 1.0]";
+        return false;
+    }
+
+    if (inputPath == outputPath)
+    {
+        message = "input and output path must be different.";
+        return false;
+    }
+
+    if (depth > 0)
+    {
+        message = "only depth -1 (static evaluation) and depth 0 (quiescence search) are supported.";
+        return false;
+    }
+
+    wait_for_search_finished();
+
+    if (threads.empty())
+        resize_threads();
+
+    if (threads.empty())
+    {
+        message = "no search worker is available.";
+        return false;
+    }
+
+    const size_t workerCount = threads.num_threads();
+
+    std::ifstream input(inputPath, std::ios::binary);
+    if (!input)
+    {
+        message = "failed to open input file: " + inputPath;
+        return false;
+    }
+
+    std::ofstream output(outputPath, std::ios::binary);
+    if (!output)
+    {
+        message = "failed to open output file: " + outputPath;
+        return false;
+    }
+
+    constexpr size_t CHUNK_RECORDS = 1 << 20;
+
+    std::vector<FairyPsvRecord> records(CHUNK_RECORDS);
+    std::vector<u8>             decoded(CHUNK_RECORDS);
+    u64                         readCount = 0, writeCount = 0;
+    const TimePoint             start = now();
+
+    const auto recordBytes = std::streamsize(sizeof(FairyPsvRecord));
+    const auto chunkBytes  = std::streamsize(records.size() * sizeof(FairyPsvRecord));
+
+    while (true)
+    {
+        input.read(reinterpret_cast<char*>(records.data()), chunkBytes);
+        const std::streamsize bytesRead = input.gcount();
+
+        if (bytesRead == 0)
+            break;
+
+        if ((bytesRead % recordBytes) != 0)
+        {
+            message = "truncated record at end of input.";
+            return false;
+        }
+
+        const size_t count = size_t(bytesRead / recordBytes);
+
+        std::atomic<size_t> nextRecord(0);
+
+        for (size_t threadId = 0; threadId < workerCount; ++threadId)
+        {
+            threads.run_on_thread(threadId, [&, threadId]() {
+                auto* worker =
+                  static_cast<YaneuraOuWorker*>(threads.threads[threadId]->worker.get());
+
+                Position  pos;
+                StateInfo si;
+                PVMoves   pv;
+
+                while (true)
+                {
+                    const size_t index = nextRecord.fetch_add(1, std::memory_order_relaxed);
+                    if (index >= count)
+                        break;
+
+                    auto& record   = records[index];
+                    decoded[index] =
+                      pos.set_from_fairy_packed_sfen(record.sfen, &si, record.gamePly).is_ok();
+                    if (!decoded[index])
+                        continue;
+
+                    const Value  v     = depth < 0 ? worker->static_evaluate(pos) : worker->qsearch_pv(pos, pv);
+                    const double score = std::round(v * scoreScale);
+                    record.score       = s16(std::clamp(score, -32000.0, 32000.0));
+                }
+            });
+        }
+
+        for (size_t threadId = 0; threadId < workerCount; ++threadId)
+            threads.wait_on_thread(threadId);
+
+        for (size_t i = 0; i < count; ++i)
+            if (decoded[i])
+            {
+                output.write(reinterpret_cast<const char*>(&records[i]), recordBytes);
+                ++writeCount;
+            }
+
+        if (!output)
+        {
+            message = "failed to write output file: " + outputPath;
+            return false;
+        }
+
+        readCount += count;
+        const TimePoint elapsed = std::max<TimePoint>(now() - start, 1);
+        sync_cout << "info string rescore processed " << readCount << " records, "
+                  << readCount * 1000 / elapsed << " records/s" << sync_endl;
+    }
+
+    if (input.bad())
+    {
+        message = "failed to read input file: " + inputPath;
+        return false;
+    }
+
+    std::ostringstream ss;
+    ss << "rescore done: records=" << readCount << " written=" << writeCount
+       << " decode_errors=" << readCount - writeCount << " workers=" << workerCount;
+    message = ss.str();
+    return true;
+}
+
 // utility functions
 
 void YaneuraOuEngine::trace_eval() const {

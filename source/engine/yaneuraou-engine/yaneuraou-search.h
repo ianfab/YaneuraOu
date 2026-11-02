@@ -389,6 +389,14 @@ class YaneuraOuEngine: public Engine {
                              size_t             workerCount,
                              std::string&       message) override;
 
+    // USI拡張コマンド "rescore" の実体。
+    // Fairy-Stockfish training data with the score replaced by the evaluation of this engine.
+    virtual bool rescore(const std::string& inputPath,
+                         const std::string& outputPath,
+                         int                depth,
+                         double             scoreScale,
+                         std::string&       message) override;
+
 	// 現在の局面の評価値の詳細を出力する。
     virtual void trace_eval() const override;
 
@@ -437,6 +445,9 @@ class YaneuraOuWorker: public Worker {
     // qsearch<PV>()をTT hitなし扱いで行い、この呼び出し中に得られたPVを返す。
     // 返されたPVを進めた局面が、qsearchで到達したleaf nodeになる。
     Value qsearch_pv(Position& pos, PVMoves& pv);
+
+    // Static evaluation of a position outside of the search (used by the "rescore" command).
+    Value static_evaluate(const Position& pos) { return evaluate(pos); }
 
     // 📌 Stockfishのsearch.hで定義されているWorkerが持っているメンバ変数 📌
 

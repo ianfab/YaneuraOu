@@ -724,6 +724,206 @@ Tools::Result Position::set_from_packed_sfen(const PackedSfen& sfen , StateInfo 
 	return Tools::Result::Ok();
 }
 
+// -----------------------------------
+//   Fairy-Stockfish training data format
+// -----------------------------------
+
+// Packed position format of Fairy-Stockfish (variant-nnue-tools) for shogi, 512 bits:
+//
+//   side to move                    1 bit (0 = sente)
+//   king squares (sente, gote)      7 bits each
+//   board without kings             empty square = 1 bit "0",
+//                                   piece = 5 bit code + 1 bit color (0 = sente)
+//   hand counts (sente, gote)       5 bits for each piece type in fairy_piece_order
+//   rest (castling, ep, rule50, move number) is not used for shogi.
+//
+// Squares are numbered from the bottom left corner as seen from sente (9i = 0, 1i = 8, 9h = 9, ...),
+// the board is written from rank "a" to rank "i" and within a rank from file 9 to file 1.
+//
+// The piece code is 2 * index + 1, where index is the position of the piece type in
+// fairy_piece_order (the order of the shogi piece types in Fairy-Stockfish).
+// Fairy-Stockfish has no separate promoted minor pieces, so they are stored as golds.
+
+namespace {
+
+const PieceType fairy_piece_order[] = { BISHOP, ROOK, SILVER, DRAGON, PAWN, LANCE, KNIGHT, GOLD, HORSE, KING };
+constexpr int FAIRY_PIECE_TYPES = 10;
+
+// Maximum number of pieces of a raw piece type, needed to keep the piece numbers of evalList in range.
+constexpr int max_piece_count[KING] = { 0, 18, 4, 4, 4, 2, 2, 4 };
+
+Square from_fairy_square(int i) { return File(FILE_9 - i % 9) | Rank(RANK_9 - i / 9); }
+
+// Decodes a packed position into board, hands and side to move. Returns false for invalid data.
+//
+// Golds exceeding the four real ones are turned back into promoted pieces of a piece type that is
+// missing otherwise. Which of the golds on the board becomes the promoted piece is arbitrary,
+// the evaluation does not distinguish them (unless DISTINGUISH_GOLDS is defined).
+bool decode_fairy_packed_sfen(const FairyPackedSfen& sfen, Piece board[SQ_NB], Hand hand[COLOR_NB], Color& turn)
+{
+	BitStream stream;
+	stream.set_data(const_cast<u8*>(sfen.data));
+
+	for (auto sq : SQ)
+		board[sq] = NO_PIECE;
+	hand[BLACK] = hand[WHITE] = HAND_ZERO;
+
+	turn = (Color)stream.read_one_bit();
+
+	for (auto c : COLOR)
+	{
+		int i = stream.read_n_bit(7);
+		if (i >= SQ_NB)
+			return false;
+		board[from_fairy_square(i)] = make_piece(c, KING);
+	}
+
+	for (Rank r = RANK_1; r <= RANK_9; ++r)
+		for (File f = FILE_9; f >= FILE_1; --f)
+		{
+			Square sq = f | r;
+			if (type_of(board[sq]) == KING || !stream.read_one_bit())
+				continue;
+
+			int index = stream.read_n_bit(4);
+			if (index >= FAIRY_PIECE_TYPES || fairy_piece_order[index] == KING)
+				return false;
+
+			Color c = (Color)stream.read_one_bit();
+			board[sq] = make_piece(c, fairy_piece_order[index]);
+		}
+
+	for (auto c : COLOR)
+		for (PieceType pt : fairy_piece_order)
+		{
+			int n = stream.read_n_bit(5);
+			if (n == 0)
+				continue;
+			if (pt == DRAGON || pt == HORSE || pt == KING)
+				return false;
+			for (int i = 0; i < n; ++i)
+				add_hand(hand[c], pt);
+		}
+
+	// 駒種ごとの枚数
+	int count[KING] = {};
+	for (auto sq : SQ)
+		if (board[sq] != NO_PIECE && type_of(board[sq]) != KING)
+			count[raw_type_of(board[sq])]++;
+	for (auto c : COLOR)
+		for (PieceType pt = PAWN; pt < KING; ++pt)
+			count[pt] += hand_count(hand[c], pt);
+
+	// 金が4枚を超えた分は成り駒に戻す
+	for (auto sq : SQ)
+	{
+		if (count[GOLD] <= max_piece_count[GOLD])
+			break;
+
+		if (type_of(board[sq]) != GOLD)
+			continue;
+
+		for (PieceType pt : { PAWN, LANCE, KNIGHT, SILVER })
+			if (count[pt] < max_piece_count[pt])
+			{
+				board[sq] = make_piece(color_of(board[sq]), PieceType(pt + PIECE_TYPE_PROMOTE));
+				count[pt]++;
+				count[GOLD]--;
+				break;
+			}
+	}
+
+	for (PieceType pt = PAWN; pt < KING; ++pt)
+		if (count[pt] > max_piece_count[pt])
+			return false;
+
+	return true;
+}
+
+} // namespace
+
+Tools::Result Position::set_from_fairy_packed_sfen(const FairyPackedSfen& sfen, StateInfo* si, int gamePly_ /* = 0 */)
+{
+	Piece packed_board[SQ_NB];
+	Hand  packed_hand[COLOR_NB];
+	Color turn;
+	if (!decode_fairy_packed_sfen(sfen, packed_board, packed_hand, turn))
+		return Tools::Result(Tools::ResultCode::SomeError);
+
+	std::memset(static_cast<void*>(this), 0, sizeof(Position));
+	std::memset(static_cast<void*>(si), 0, sizeof(StateInfo));
+	st = si;
+
+	sideToMove = turn;
+
+	#if defined(USE_EVAL_LIST)
+	evalList.clear();
+
+	// それぞれの駒をどこまで使ったかのカウンター
+	PieceNumber piece_no_count[KING] = { PIECE_NUMBER_ZERO,PIECE_NUMBER_PAWN,PIECE_NUMBER_LANCE,PIECE_NUMBER_KNIGHT,
+		PIECE_NUMBER_SILVER, PIECE_NUMBER_BISHOP, PIECE_NUMBER_ROOK,PIECE_NUMBER_GOLD };
+	#endif
+
+	kingSquare[BLACK] = kingSquare[WHITE] = SQ_NB;
+
+	// 盤上の駒
+	for (auto sq : SQ)
+	{
+		Piece pc = packed_board[sq];
+		if (pc == NO_PIECE)
+			continue;
+
+		put_piece(pc, sq);
+
+	#if defined(USE_EVAL_LIST)
+		PieceNumber piece_no =
+			(pc == B_KING) ? PIECE_NUMBER_BKING : // 先手玉
+			(pc == W_KING) ? PIECE_NUMBER_WKING : // 後手玉
+			piece_no_count[raw_type_of(pc)]++; // それ以外
+
+		evalList.put_piece(piece_no, sq, pc);
+	#endif
+	}
+
+	// 手駒
+	hand[BLACK] = packed_hand[BLACK];
+	hand[WHITE] = packed_hand[WHITE];
+
+	#if defined(USE_EVAL_LIST)
+	for (auto c : COLOR)
+		for (PieceType pt = PAWN; pt < KING; ++pt)
+			for (int i = 0; i < hand_count(hand[c], pt); ++i)
+			{
+				PieceNumber piece_no = piece_no_count[pt]++;
+				ASSERT_LV1(is_ok(piece_no));
+				evalList.put_piece(piece_no, c, pt, i);
+			}
+	#endif
+
+	gamePly = gamePly_;
+
+	update_bitboards();
+	update_kingSquare();
+
+	set_state();
+
+	#if defined (LONG_EFFECT_LIBRARY)
+	LongEffect::calc_effect(*this);
+	#endif
+
+#if defined(USE_PIECE_VALUE)
+	st->materialValue = Eval::material(*this);
+#endif
+
+#if defined(USE_CLASSIC_EVAL)
+	Eval::compute_eval(*this);
+#endif
+
+	update_entering_point();
+
+	return Tools::Result::Ok();
+}
+
 // 盤面と手駒、手番を与えて、そのsfenを返す。
 std::string Position::sfen_from_rawdata(Piece board[81], Hand hands[2], Color turn, int gamePly_)
 {

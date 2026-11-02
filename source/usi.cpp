@@ -418,6 +418,10 @@ bool USIEngine::usi_cmdexec(const std::string& cmd) {
     else if (token == "qsearch_psv")
         qsearch_psv(is);
 
+    // Fairy-Stockfish形式の教師局面(.bin)の評価値を付け直す。
+    else if (token == "rescore")
+        rescore(is);
+
 #if defined(ENABLE_MAKEBOOK_CMD)
 	// 定跡コマンド
 	else if (token == "makebook")
@@ -1428,6 +1432,43 @@ void USIEngine::qsearch_psv(std::istringstream& is) {
 
     if (!ok)
         sync_cout << "info string qsearch_psv failed" << sync_endl;
+}
+
+// USI拡張コマンド "rescore" のhandler。
+//   rescore input_file_name in.bin output_file_name out.bin [depth -1] [score_scale 1.0]
+// depth < 0 : static evaluation, depth == 0 : quiescence search.
+// The number of workers is set by the USI option Threads.
+void USIEngine::rescore(std::istringstream& is) {
+    std::string inputPath, outputPath;
+    int         depth      = -1;
+    double      scoreScale = 1.0;
+
+    std::string token;
+    while (is >> token)
+    {
+        if (token == "input_file_name")
+            is >> inputPath;
+        else if (token == "output_file_name")
+            is >> outputPath;
+        else if (token == "depth")
+            is >> depth;
+        else if (token == "score_scale")
+            is >> scoreScale;
+        else
+        {
+            sync_cout << "info string Error! : unknown token " << token << sync_endl;
+            return;
+        }
+    }
+
+    std::string message;
+    const bool  ok = engine.rescore(inputPath, outputPath, depth, scoreScale, message);
+
+    if (!message.empty())
+        sync_cout << "info string " << message << sync_endl;
+
+    if (!ok)
+        sync_cout << "info string rescore failed" << sync_endl;
 }
 
 // "unittest"コマンドのhandler

@@ -297,6 +297,25 @@ struct PsvRecord {
 
 static_assert(sizeof(PsvRecord) == 40, "PsvRecord must be 40 bytes");
 
+// Packed position in the training data format of Fairy-Stockfish (variant-nnue-tools) for shogi.
+// See extra/sfen_packer.cpp for the layout.
+struct FairyPackedSfen {
+	u8 data[64];
+};
+
+// One record of Fairy-Stockfish training data (.bin), 72 bytes.
+// The score is from the side to move's point of view, the move is in the encoding of Fairy-Stockfish.
+struct FairyPsvRecord {
+	FairyPackedSfen sfen;
+	s16             score;
+	u16             move;
+	u16             gamePly;
+	s8              game_result;
+	u8              padding;
+};
+
+static_assert(sizeof(FairyPsvRecord) == 72, "FairyPsvRecord must be 72 bytes");
+
 // std::unordered_mapで使用できるようにhash関数を定義しておく。
 // std::unordered_map<PackedSfen,int,PackedSfenHash> packed_sfen_to_int;のようにtemplateの第3引数に指定する。
 struct PackedSfenHash {
@@ -993,6 +1012,10 @@ public:
 	// 渡された局面に問題があって、エラーのときはTools::Result::SomeErrorを返す。
 	// PackedSfenにgamePlyは含まないので復元できない。そこを設定したいのであれば引数で指定すること。
 	Tools::Result set_from_packed_sfen(const PackedSfen& sfen , StateInfo * si , bool mirror=false , int gamePly_ = 0);
+
+	// Sets a position packed in the training data format of Fairy-Stockfish.
+	// Returns Tools::ResultCode::SomeError for data that does not describe a valid shogi position.
+	Tools::Result set_from_fairy_packed_sfen(const FairyPackedSfen& sfen, StateInfo* si, int gamePly_ = 0);
 
 	// 盤面と手駒、手番を与えて、そのsfenを返す。
 	static std::string sfen_from_rawdata(Piece board[81], Hand hands[2], Color turn, int gamePly);
